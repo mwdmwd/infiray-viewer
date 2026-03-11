@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infiray-viewer"
+version = "1"
+description = "Thermal image viewer for InfiRay .irg files"
+license = "GPL-3.0-or-later"
+requires-python = ">= 3.10"
+dependencies = [
+    "matplotlib ~= 3.10",
+    "numpy ~= 2.4",
+    "tkinterdnd2 ~= 0.4",
+    "infiray-irg ~= 1.6",
+]
+
+[project.scripts]
+infiray-viewer = "viewer:main"
+
+[tool.setuptools]
+py-modules = ["viewer"]

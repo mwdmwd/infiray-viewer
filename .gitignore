@@ -1,0 +1,3 @@
+*.irg
+__pycache__
+*.egg-info
