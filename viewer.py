@@ -222,7 +222,7 @@ class ThermalViewer(Tk):  # type: ignore
             pass
 
     def on_drop(self, event):
-        self.load_image(event.data[1:-1])
+        self.load_image(self.tk.splitlist(event.data)[0])
 
     def open_file(self):
         file_path = filedialog.askopenfilename(
