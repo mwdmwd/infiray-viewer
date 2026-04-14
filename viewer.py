@@ -76,10 +76,6 @@ class ThermalViewer(Tk):  # type: ignore
         self.current_file = None
         self.directory_files = []
 
-        self.ax_coarse = None
-        self.ax_fine = None
-        self.ax_vis = None
-
         # UI state
         self.show_coarse = tk.BooleanVar(value=False)
         self.show_thermal = tk.BooleanVar(value=True)
@@ -107,6 +103,7 @@ class ThermalViewer(Tk):  # type: ignore
         }
 
         self._setup_ui()
+        self.redraw_plots()
 
         self.bind("<Left>", lambda e: self.prev_file())
         self.bind("<Right>", lambda e: self.next_file())
@@ -317,6 +314,9 @@ class ThermalViewer(Tk):  # type: ignore
 
     def redraw_plots(self):
         self.fig.clear()
+        self.ax_coarse = None
+        self.ax_fine = None
+        self.ax_vis = None
         self.current_patches = []
         self.current_text = None
 
