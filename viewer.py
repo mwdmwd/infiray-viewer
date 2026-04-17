@@ -21,6 +21,7 @@ except ImportError:
     DND_FILES = "DND_Files"
 
 import matplotlib
+import matplotlib.axes
 import numpy as np
 from matplotlib.backends.backend_tkagg import (
     FigureCanvasTkAgg,
@@ -61,6 +62,105 @@ class Measurement:
     text_pos: Point
 
 
+class View:
+    name = "view"
+    title = "View"
+
+    def __init__(self, viewer: "ThermalViewer", enabled: bool = True):
+        self.viewer = viewer
+        self.data: np.ndarray | None = None
+        self.enabled = tk.BooleanVar(value=enabled)
+        self.ax: matplotlib.axes.Axes | None = None
+
+    def render(self, ax: matplotlib.axes.Axes) -> None:
+        self.ax = ax
+        ax.set_title(self.title)
+        ax.axis("off")
+
+
+class CoarseView(View):
+    name = "coarse"
+    title = "Coarse"
+
+    def render(self, ax: matplotlib.axes.Axes) -> None:
+        if self.data is None:
+            return
+        super().render(ax)
+        ax.imshow(self.data, cmap="gray")
+
+
+class ThermalView(View):
+    name = "thermal"
+    title = "Temperature (°C)"
+
+    def __init__(self, viewer: "ThermalViewer", enabled: bool = True):
+        super().__init__(viewer, enabled)
+        self.vis_data: np.ndarray | None = None
+
+    def render(self, ax: matplotlib.axes.Axes) -> None:
+        if self.data is None:
+            return
+        super().render(ax)
+        min_temp = self.data.min()
+        max_temp = self.data.max()
+        fine_img = ax.imshow(
+            self.data, cmap=self.viewer.cmap_var.get(), vmin=min_temp, vmax=max_temp
+        )
+
+        if (fusion_alpha := self.viewer.fusion_alpha_var.get()) > 0 and self.vis_data is not None:
+            ax.imshow(self.vis_data, alpha=fusion_alpha)
+            ax.set_title("Fusion")
+
+        cax = ax.inset_axes((0, -0.08, 1, 0.05))
+        cbar = self.viewer.fig.colorbar(fine_img, cax=cax, orientation="horizontal")
+        locator = ticker.MaxNLocator(nbins=9, min_n_ticks=8)
+        cbar.locator = locator
+        cbar.update_ticks()
+
+        ticks = list(cbar.get_ticks())
+        range_temp = max_temp - min_temp
+        if range_temp > 0:
+            ticks = (
+                [min_temp]
+                + [
+                    t
+                    for t in ticks
+                    if min_temp < t < max_temp
+                    and abs(t - min_temp) > 0.05 * range_temp
+                    and abs(t - max_temp) > 0.05 * range_temp
+                ]
+                + [max_temp]
+            )
+
+        cbar.set_ticks(ticks)
+        cbar.ax.set_xticklabels([f"{t:.1f}" for t in ticks])
+        cbar.ax.set_xlim(min_temp, max_temp)
+
+        if self.viewer.show_global_minmax.get():
+            min_y, min_x = np.unravel_index(self.data.argmin(), self.data.shape)
+            max_y, max_x = np.unravel_index(self.data.argmax(), self.data.shape)
+            self.viewer.plot_marker(min_x, min_y, "blue")
+            self.viewer.plot_marker(max_x, max_y, "red")
+
+        if self.viewer.measurement is not None:
+            tool = self.viewer.measurement.tool
+            self.viewer.draw_tool_shape(tool, *self.viewer.measurement.coords)
+            tool_fn = self.viewer._MEASUREMENT_TOOLS.get(tool)
+            if tool_fn and (stats_text := tool_fn(*self.viewer.measurement.coords)):
+                self.viewer.draw_measurement_text(stats_text, *self.viewer.measurement.text_pos)
+
+
+class VisibleView(View):
+    name = "visible"
+    title = "Visible"
+
+    def render(self, ax: matplotlib.axes.Axes) -> None:
+        if self.data is None:
+            return
+        super().render(ax)
+        ax.imshow(self.data)
+
+
 class ThermalViewer(Tk):  # type: ignore
     TITLE = "Thermal image viewer"
 
@@ -69,17 +169,16 @@ class ThermalViewer(Tk):  # type: ignore
         self.title(self.TITLE)
         self.geometry("1500x800")
 
-        self.fine_data = None
-        self.raw_fine_data = None
-        self.vis_data = None
-        self.coarse_data = None
-        self.current_file = None
-        self.directory_files = []
+        self.raw_fine_data: np.ndarray | None = None
+        self.current_file: Path | None = None
+        self.directory_files: list[Path] = []
+
+        self.coarse_view = CoarseView(self, enabled=False)
+        self.thermal_view = ThermalView(self)
+        self.visible_view = VisibleView(self)
+        self.views = [self.coarse_view, self.thermal_view, self.visible_view]
 
         # UI state
-        self.show_coarse = tk.BooleanVar(value=False)
-        self.show_thermal = tk.BooleanVar(value=True)
-        self.show_visible = tk.BooleanVar(value=True)
         self.fusion_alpha_var = tk.DoubleVar(value=0.0)
         self.palettes = ["inferno", "plasma", "viridis", "magma", "gray", "jet"]
         self.cmap_var = tk.StringVar(value=self.palettes[0])
@@ -126,15 +225,13 @@ class ThermalViewer(Tk):  # type: ignore
 
         # View options
         Label(toolbar_frame, text=" | Views:").pack(side=tk.LEFT, padx=2)
-        Checkbutton(
-            toolbar_frame, text="Coarse", variable=self.show_coarse, command=self.redraw_plots
-        ).pack(side=tk.LEFT)
-        Checkbutton(
-            toolbar_frame, text="Thermal", variable=self.show_thermal, command=self.redraw_plots
-        ).pack(side=tk.LEFT)
-        Checkbutton(
-            toolbar_frame, text="Visible", variable=self.show_visible, command=self.redraw_plots
-        ).pack(side=tk.LEFT)
+        for view in self.views:
+            Checkbutton(
+                toolbar_frame,
+                text=view.name.title(),  # not i18n ready!?
+                variable=view.enabled,
+                command=self.redraw_plots,
+            ).pack(side=tk.LEFT)
         Label(toolbar_frame, text=" Fusion:").pack(side=tk.LEFT, padx=(4, 0))
         self.fusion_alpha_scale = Scale(
             toolbar_frame,
@@ -272,9 +369,12 @@ class ThermalViewer(Tk):  # type: ignore
             p = Path(file_path)
             data = p.read_bytes()
             coarse, fine, vis = infiray_irg.load(data)
-            self.coarse_data = coarse
+            self.coarse_view.data = coarse
             self.raw_fine_data = fine.copy()
-            self.vis_data = vis
+            if vis is not None:
+                vis = np.asarray(vis)
+            self.visible_view.data = vis
+            self.thermal_view.vis_data = vis
 
             self.update_directory_files(file_path)
             self.title(f"{self.TITLE} - {p.name}")
@@ -298,14 +398,14 @@ class ThermalViewer(Tk):  # type: ignore
             eps = max(0.01, min(eps, 1.0))
 
             if eps == 1.0:
-                self.fine_data = self.raw_fine_data.copy()
+                self.thermal_view.data = self.raw_fine_data.copy()
             else:
                 meas_k = self.raw_fine_data + 273.15
                 refl_k = trefl + 273.15
 
                 val = (meas_k**4 - (1 - eps) * refl_k**4) / eps
                 val = np.maximum(val, 0)
-                self.fine_data = val**0.25 - 273.15
+                self.thermal_view.data = val**0.25 - 273.15
 
             self.clear_measurement()
             self.redraw_plots()
@@ -314,96 +414,29 @@ class ThermalViewer(Tk):  # type: ignore
 
     def redraw_plots(self):
         self.fig.clear()
-        self.ax_coarse = None
-        self.ax_fine = None
-        self.ax_vis = None
+        for view in self.views:
+            view.ax = None
         self.current_patches = []
         self.current_text = None
 
-        self.fusion_alpha_scale.configure(state="normal" if self.show_thermal.get() else "disabled")
+        self.fusion_alpha_scale.configure(
+            state="normal" if self.thermal_view.enabled.get() else "disabled"
+        )
 
-        views_to_show = []
-        if self.show_coarse.get() and self.coarse_data is not None:
-            views_to_show.append("coarse")
-        if self.show_thermal.get() and self.fine_data is not None:
-            views_to_show.append("thermal")
-        if self.show_visible.get() and self.vis_data is not None:
-            views_to_show.append("visible")
+        active = [v for v in self.views if v.enabled.get() and v.data is not None]
 
-        if not views_to_show:
+        if not active:
             self.canvas.draw()
             return
 
-        for i, view in enumerate(views_to_show):
-            ax = self.fig.add_subplot(1, len(views_to_show), i + 1)
-
-            if view == "coarse" and self.coarse_data is not None:
-                self.ax_coarse = ax
-                ax.imshow(self.coarse_data, cmap="gray")
-                ax.set_title("Coarse")
-                ax.axis("off")
-
-            elif view == "thermal" and self.fine_data is not None:
-                self.ax_fine = ax
-                min_temp = self.fine_data.min()
-                max_temp = self.fine_data.max()
-                fine_img = ax.imshow(
-                    self.fine_data, cmap=self.cmap_var.get(), vmin=min_temp, vmax=max_temp
-                )
-
-                if (fusion_alpha := self.fusion_alpha_var.get()) > 0 and self.vis_data is not None:
-                    ax.imshow(np.asarray(self.vis_data), alpha=fusion_alpha)
-                    ax.set_title("Fusion")
-                else:
-                    ax.set_title("Temperature (°C)")
-
-                ax.axis("off")
-                cax = ax.inset_axes((0, -0.08, 1, 0.05))
-                cbar = self.fig.colorbar(fine_img, cax=cax, orientation="horizontal")
-                locator = ticker.MaxNLocator(nbins=9, min_n_ticks=8)
-                cbar.locator = locator
-                cbar.update_ticks()
-
-                ticks = cbar.get_ticks()
-                range_temp = max_temp - min_temp
-                if range_temp > 0:
-                    ticks = [
-                        t
-                        for t in ticks
-                        if min_temp < t < max_temp
-                        and abs(t - min_temp) > 0.05 * range_temp
-                        and abs(t - max_temp) > 0.05 * range_temp
-                    ]
-
-                new_ticks = sorted(ticks + [min_temp, max_temp])
-                cbar.set_ticks(new_ticks)
-                cbar.ax.set_xticklabels([f"{t:.1f}" for t in new_ticks])
-                cbar.ax.set_xlim(min_temp, max_temp)
-
-                if self.show_global_minmax.get():
-                    min_y, min_x = np.unravel_index(self.fine_data.argmin(), self.fine_data.shape)
-                    max_y, max_x = np.unravel_index(self.fine_data.argmax(), self.fine_data.shape)
-                    self.plot_marker(min_x, min_y, "blue")
-                    self.plot_marker(max_x, max_y, "red")
-
-                if self.measurement is not None:
-                    tool = self.measurement.tool
-                    self.draw_tool_shape(tool, *self.measurement.coords)
-                    tool_fn = self._MEASUREMENT_TOOLS.get(tool)
-                    if tool_fn and (stats_text := tool_fn(*self.measurement.coords)):
-                        self.draw_measurement_text(stats_text, *self.measurement.text_pos)
-
-            elif view == "visible" and self.vis_data is not None:
-                self.ax_vis = ax
-                ax.imshow(self.vis_data)
-                ax.set_title("Visible")
-                ax.axis("off")
+        for i, view in enumerate(active):
+            view.render(self.fig.add_subplot(1, len(active), i + 1))
 
         self.canvas.draw()
 
     def clear_measurement(self):
         self.measurement = None
-        if self.ax_fine is None:
+        if self.thermal_view.ax is None:
             return
 
         for p in self.current_patches:
@@ -422,7 +455,8 @@ class ThermalViewer(Tk):  # type: ignore
         self.canvas.draw_idle()
 
     def on_mouse_press(self, event):
-        if event.inaxes != self.ax_fine or self.fine_data is None:
+        thermal_view = self.thermal_view
+        if event.inaxes != thermal_view.ax or thermal_view.data is None:
             return
 
         if self.tool_var.get() == "None":
@@ -434,19 +468,20 @@ class ThermalViewer(Tk):  # type: ignore
             self.rect_start = (event.xdata, event.ydata)
 
     def on_mouse_move(self, event):
-        if event.inaxes != self.ax_fine:
+        thermal_view = self.thermal_view
+        if event.inaxes != thermal_view.ax:
             self.hover_tooltip.place_forget()
             return
 
-        if self.ax_fine is None or self.fine_data is None:
+        if thermal_view.ax is None or thermal_view.data is None:
             return
 
         if event.xdata is None or event.ydata is None:
             return
 
         x, y = int(event.xdata + 0.5), int(event.ydata + 0.5)
-        if 0 <= y < self.fine_data.shape[0] and 0 <= x < self.fine_data.shape[1]:
-            temp = self.fine_data[y, x]
+        if 0 <= y < thermal_view.data.shape[0] and 0 <= x < thermal_view.data.shape[1]:
+            temp = thermal_view.data[y, x]
 
             self.hover_tooltip.config(text=f"{temp:.2f} °C")
             tk_x = event.x + 10
@@ -476,7 +511,8 @@ class ThermalViewer(Tk):  # type: ignore
         self.canvas.draw_idle()
 
     def draw_tool_shape(self, tool: str, p0: Point, p1: Point):
-        assert self.ax_fine is not None
+        thermal_ax = self.thermal_view.ax
+        assert thermal_ax is not None
         x0, y0 = p0
         x1, y1 = p1
 
@@ -484,17 +520,18 @@ class ThermalViewer(Tk):  # type: ignore
             p = patches.Rectangle(
                 (x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="cyan", linewidth=2
             )
-            self.ax_fine.add_patch(p)
+            thermal_ax.add_patch(p)
             self.current_patches.append(p)
         elif tool == "Line":
             p = lines.Line2D([x0, x1], [y0, y1], color="cyan", linewidth=2)
-            self.ax_fine.add_line(p)
+            thermal_ax.add_line(p)
             self.current_patches.append(p)
 
     def draw_measurement_text(self, stats_text: str, text_x: float, text_y: float):
-        assert self.ax_fine is not None
+        thermal_ax = self.thermal_view.ax
+        assert thermal_ax is not None
         bbox_props = dict(boxstyle="round,pad=0.3", fc="black", ec="cyan", alpha=0.7)
-        self.current_text = self.ax_fine.text(
+        self.current_text = thermal_ax.text(
             text_x,
             text_y,
             stats_text,
@@ -505,8 +542,9 @@ class ThermalViewer(Tk):  # type: ignore
         )
 
     def plot_marker(self, x, y, color):
-        assert self.ax_fine is not None and self.fine_data is not None
-        ref = min(self.fine_data.shape)  # 240 on original camera display (240x320)
+        thermal_view = self.thermal_view
+        assert thermal_view.ax is not None and thermal_view.data is not None
+        ref = min(thermal_view.data.shape)  # 240 on original camera display (240x320)
         sq = ref * 14 / 240  # square side length
         s = sq / 2
         L = ref * 5 / 240  # arm length beyond the square's edge
@@ -516,7 +554,7 @@ class ThermalViewer(Tk):  # type: ignore
         square = patches.Rectangle(
             (x - s, y - s), sq, sq, fill=False, edgecolor=color, linewidth=lw
         )
-        self.ax_fine.add_patch(square)
+        thermal_view.ax.add_patch(square)
         res.append(square)
         for x0, y0, x1, y1 in (
             (x, y - s, x, y - s - L),  # top
@@ -525,24 +563,25 @@ class ThermalViewer(Tk):  # type: ignore
             (x + s, y, x + s + L, y),  # right
         ):
             ln = lines.Line2D([x0, x1], [y0, y1], color=color, linewidth=lw)
-            self.ax_fine.add_line(ln)
+            thermal_view.ax.add_line(ln)
             res.append(ln)
         return res
 
     def measure_rectangle(self, start: Point, end: Point) -> str:
-        assert self.fine_data is not None and self.ax_fine is not None
+        thermal_view = self.thermal_view
+        assert thermal_view.data is not None and thermal_view.ax is not None
 
         xs = (start[0], end[0])
         ys = (start[1], end[1])
         x_min, x_max = int(min(xs)), int(max(xs))
         y_min, y_max = int(min(ys)), int(max(ys))
 
-        x_min = max(0, min(x_min, self.fine_data.shape[1] - 1))
-        x_max = max(0, min(x_max, self.fine_data.shape[1] - 1))
-        y_min = max(0, min(y_min, self.fine_data.shape[0] - 1))
-        y_max = max(0, min(y_max, self.fine_data.shape[0] - 1))
+        x_min = max(0, min(x_min, thermal_view.data.shape[1] - 1))
+        x_max = max(0, min(x_max, thermal_view.data.shape[1] - 1))
+        y_min = max(0, min(y_min, thermal_view.data.shape[0] - 1))
+        y_max = max(0, min(y_max, thermal_view.data.shape[0] - 1))
 
-        roi = self.fine_data[y_min : y_max + 1, x_min : x_max + 1]
+        roi = thermal_view.data[y_min : y_max + 1, x_min : x_max + 1]
         if roi.size == 0:
             return ""
 
@@ -559,7 +598,8 @@ class ThermalViewer(Tk):  # type: ignore
         return f"Min: {min_val:.2f}°C\nMax: {max_val:.2f}°C\nAvg: {mean_val:.2f}°C"
 
     def measure_line(self, start: Point, end: Point) -> str:
-        assert self.fine_data is not None and self.ax_fine is not None
+        thermal_view = self.thermal_view
+        assert thermal_view.data is not None and thermal_view.ax is not None
 
         x0, y0 = start
         x1, y1 = end
@@ -572,16 +612,16 @@ class ThermalViewer(Tk):  # type: ignore
 
         valid = (
             (x_idx >= 0)
-            & (x_idx < self.fine_data.shape[1])
+            & (x_idx < thermal_view.data.shape[1])
             & (y_idx >= 0)
-            & (y_idx < self.fine_data.shape[0])
+            & (y_idx < thermal_view.data.shape[0])
         )
         x_idx, y_idx = x_idx[valid], y_idx[valid]
 
         if len(x_idx) == 0:
             return ""
 
-        vals = self.fine_data[y_idx, x_idx]
+        vals = thermal_view.data[y_idx, x_idx]
         min_idx, max_idx = vals.argmin(), vals.argmax()
         min_x_abs, min_y_abs = x_idx[min_idx], y_idx[min_idx]
         max_x_abs, max_y_abs = x_idx[max_idx], y_idx[max_idx]
@@ -596,10 +636,11 @@ class ThermalViewer(Tk):  # type: ignore
             return
         self.is_drawing = False
 
-        if self.ax_fine is None or self.fine_data is None:
+        thermal_view = self.thermal_view
+        if thermal_view.ax is None or thermal_view.data is None:
             return
 
-        if event.inaxes != self.ax_fine:
+        if event.inaxes != thermal_view.ax:
             return
 
         tool = self.tool_var.get()
@@ -615,8 +656,8 @@ class ThermalViewer(Tk):  # type: ignore
             return
 
         if stats_text := self._MEASUREMENT_TOOLS[tool](*coords):
-            text_x = min(max(x1, 10), self.fine_data.shape[1] - 70)
-            text_y = min(max(y1, 10), self.fine_data.shape[0] - 30)
+            text_x = min(max(x1, 10), thermal_view.data.shape[1] - 70)
+            text_y = min(max(y1, 10), thermal_view.data.shape[0] - 30)
             self.draw_measurement_text(stats_text, text_x, text_y)
             self.measurement = Measurement(
                 tool=tool,
